@@ -123,19 +123,20 @@ describe("loadSettings default gateway URL derivation", () => {
     localStorage.setItem(
       "openclaw.control.settings.v1",
       JSON.stringify({
-        gatewayUrl: "wss://gateway.example:8443/openclaw",
+        gatewayUrl: "wss://gateway.example:8443",
         token: "persisted-token",
         sessionKey: "agent",
       }),
     );
 
     const settings = loadSettings();
-    expect(settings.gatewayUrl).toBe("wss://gateway.example:8443/openclaw");
+    // Legacy URL matches page-derived URL (both root path), so it is used
+    expect(settings.gatewayUrl).toBe("wss://gateway.example:8443");
     expect(settings.token).toBe("");
     expect(settings.sessionKey).toBe("agent");
-    const scopedKey = "openclaw.control.settings.v1:wss://gateway.example:8443/openclaw";
+    const scopedKey = "openclaw.control.settings.v1:wss://gateway.example:8443";
     expect(JSON.parse(localStorage.getItem(scopedKey) ?? "{}")).toEqual({
-      gatewayUrl: "wss://gateway.example:8443/openclaw",
+      gatewayUrl: "wss://gateway.example:8443",
       theme: "claw",
       themeMode: "system",
       chatShowThinking: true,
@@ -149,7 +150,7 @@ describe("loadSettings default gateway URL derivation", () => {
       borderRadius: 50,
       textScale: 100,
       sessionsByGateway: {
-        "wss://gateway.example:8443/openclaw": {
+        "wss://gateway.example:8443": {
           sessionKey: "agent",
           lastActiveSessionKey: "agent",
         },
@@ -667,6 +668,175 @@ describe("loadSettings default gateway URL derivation", () => {
       name: null,
       avatar: null,
     });
+  });
+
+  // ── #97636: unscoped legacy key cross-gateway isolation ──
+
+  it("blocks legacy unscoped key from overriding with stale cross-base-path gatewayUrl", () => {
+    // Simulate Gateway A at /openclaw and Gateway B at /admin.
+    // The legacy key stores Gateway A's URL but we're on Gateway B's page.
+    setTestLocation({
+      protocol: "https:",
+      host: "gateway.example:8443",
+      pathname: "/admin/chat",
+    });
+    setControlUiBasePath("/admin");
+
+    // Pre-seed the unscoped legacy key with Gateway A's URL
+    localStorage.setItem(
+      "openclaw.control.settings.v1",
+      JSON.stringify({
+        gatewayUrl: "wss://gateway.example:8443/openclaw",
+        theme: "dash",
+        sessionKey: "agent:gateway_a:main",
+        lastActiveSessionKey: "agent:gateway_a:main",
+      }),
+    );
+
+    const settings = loadSettings();
+    // Must use the page-derived URL, not Gateway A's stale URL
+    expect(settings.gatewayUrl).toBe(expectedGatewayUrl("/admin"));
+    // Other settings from the legacy key should still be loaded
+    expect(settings.theme).toBe("dash");
+  });
+
+  it("preserves intentional custom endpoint from scoped key even when URL differs from page", () => {
+    setTestLocation({
+      protocol: "https:",
+      host: "gateway.example:8443",
+      pathname: "/openclaw/chat",
+    });
+    setControlUiBasePath("/openclaw");
+
+    const customUrl = "wss://custom-endpoint.example:9999";
+    const scopedKey = `openclaw.control.settings.v1:${expectedGatewayUrl("/openclaw")}`;
+    localStorage.setItem(
+      scopedKey,
+      JSON.stringify({
+        gatewayUrl: customUrl,
+        theme: "claw",
+        sessionKey: "main",
+        lastActiveSessionKey: "main",
+      }),
+    );
+    // Also seed a legacy key to make sure it doesn't interfere
+    localStorage.setItem(
+      "openclaw.control.settings.v1",
+      JSON.stringify({ gatewayUrl: "wss://stale.example:8443/other" }),
+    );
+
+    const settings = loadSettings();
+    // Scoped key wins — custom endpoint is intentional, preserve it
+    expect(settings.gatewayUrl).toBe(customUrl);
+  });
+
+  it("preserves intentional custom endpoint from default key when URL differs from page", () => {
+    setTestLocation({
+      protocol: "https:",
+      host: "gateway.example:8443",
+      pathname: "/openclaw/chat",
+    });
+    setControlUiBasePath("/openclaw");
+
+    const customUrl = "wss://other-gateway.example:8443";
+    localStorage.setItem(
+      "openclaw.control.settings.v1:default",
+      JSON.stringify({
+        gatewayUrl: customUrl,
+        theme: "dash",
+        sessionKey: "main",
+        lastActiveSessionKey: "main",
+      }),
+    );
+
+    const settings = loadSettings();
+    // Default key is trusted, preserve the custom endpoint
+    expect(settings.gatewayUrl).toBe(customUrl);
+    expect(settings.theme).toBe("dash");
+  });
+
+  it("uses legacy key gatewayUrl when it matches the page-derived URL", () => {
+    setTestLocation({
+      protocol: "https:",
+      host: "gateway.example:8443",
+      pathname: "/openclaw/chat",
+    });
+    setControlUiBasePath("/openclaw");
+
+    const gwUrl = expectedGatewayUrl("/openclaw");
+    localStorage.setItem(
+      "openclaw.control.settings.v1",
+      JSON.stringify({
+        gatewayUrl: gwUrl,
+        theme: "dash",
+        themeMode: "light",
+        sessionKey: "agent:legacy:main",
+        lastActiveSessionKey: "agent:legacy:main",
+      }),
+    );
+
+    const settings = loadSettings();
+    // Legacy URL matches the page — should be used (via effective default)
+    expect(settings.gatewayUrl).toBe(gwUrl);
+    expect(settings.theme).toBe("dash");
+    expect(settings.themeMode).toBe("light");
+  });
+
+  it("prioritizes scoped key over default key over legacy key", () => {
+    setTestLocation({
+      protocol: "https:",
+      host: "gateway.example:8443",
+      pathname: "/openclaw/chat",
+    });
+    setControlUiBasePath("/openclaw");
+
+    const gwUrl = expectedGatewayUrl("/openclaw");
+    const scopedKeyName = `openclaw.control.settings.v1:${gwUrl}`;
+
+    // Store ONLY in scoped key first (no default/legacy)
+    localStorage.setItem(
+      scopedKeyName,
+      JSON.stringify({
+        gatewayUrl: gwUrl,
+        theme: "dash",
+        borderRadius: 25,
+      }),
+    );
+
+    const settings = loadSettings();
+    expect(settings.theme).toBe("dash");
+    expect(settings.borderRadius).toBe(25);
+  });
+
+  it("persistSettings does not write to the unscoped legacy key", () => {
+    setTestLocation({
+      protocol: "https:",
+      host: "gateway.example:8443",
+      pathname: "/openclaw/chat",
+    });
+    setControlUiBasePath("/openclaw");
+
+    const gwUrl = expectedGatewayUrl("/openclaw");
+    saveSettings({
+      gatewayUrl: gwUrl,
+      token: "",
+      sessionKey: "main",
+      lastActiveSessionKey: "main",
+      theme: "claw",
+      themeMode: "system",
+      chatShowThinking: true,
+      chatShowToolCalls: true,
+      splitRatio: 0.6,
+      navCollapsed: false,
+      navWidth: 220,
+      navGroupsCollapsed: {},
+      borderRadius: 50,
+    });
+
+    // Only the scoped key should exist; legacy key must NOT be written
+    const scopedKey = `openclaw.control.settings.v1:${gwUrl}`;
+    expect(localStorage.getItem(scopedKey)).not.toBeNull();
+    expect(localStorage.getItem("openclaw.control.settings.v1")).toBeNull();
   });
 
   it("removes the persisted local user identity when cleared", () => {
